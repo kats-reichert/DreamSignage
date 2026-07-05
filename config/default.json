@@ -1,0 +1,12 @@
+{
+    "config": { 
+        "scanIntervall": 10,
+        "contentIntervall": 20,
+        "backgroundColor": "#141414",
+        "httpPort": 80,
+        "useSSL": false,
+        "sslkey": "/etc/example/privatekey.pem",
+        "sslCert": "/etc/example/fullchain.pem",
+        "sslPort": 3001
+    }
+}

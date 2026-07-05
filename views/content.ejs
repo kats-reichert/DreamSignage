@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+  <html lang="en" xml:lang="en" xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+  <title>DreamSignageX</title>
+  <link rel="icon" type="image/x-icon" href="/img/DreamSignage-Logo-Light-Icon.ico">
+  <script src="js/pdf.js"></script>
+  <script src="js/anime.min.js"></script>
+  <script src='/socket.io/socket.io.js'></script>
+  <link rel="stylesheet" href="css/display.css">
+
+</head>
+
+<body id="contentBody">
+  <div id="urgent"><span id="urgentMsg" class="ticker-text"></span></div>
+  <div id="cc"></div>
+  <div id="loadInidcator" class="center">
+    <h1>DreamSignageX</h1>
+    <h2 id="waitingTxt">Waiting for content for screen <%= display %></h2 >
+      <h2 id="loadingTxt">Loading content for screen <%= display %></h2>
+        <div class="loader"></div>
+  </div>
+  <div id="bottombar">
+    <div id="info"><span id="infoMsg" class="ticker-text"></span></div>
+    <div id="clock"></div>
+  </div>
+</body>
+
+<script>
+  function startClock() {
+    function updateDateTime() {
+      const jetzt = new Date();
+      const tag = jetzt.toLocaleDateString('de-DE', { weekday: 'long' });
+      const zeit = jetzt.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+      document.getElementById('clock').textContent = `${tag}, ${zeit}`;
+    }
+    updateDateTime();
+    setInterval(updateDateTime, 1000); // setInterval is immune to clearTimeout in Reset()
+  }
+
+
+startClock();
+
+    const display = "<%= display %>";
+    console.log("Screen: ", display);
+  // Create a socket connection
+  var socket = io.connect('', { query: { myParam: display} });
+  // Initial declarations
+  var fileList = [];
+  var currentIndex = 0;
+  var isPlaying = false;
+  var currentVideo = null;
+  var videoList = [];
+  var contentPromises = [];
+  var contentTime = 20;
+  var currentPage = 0;
+  var pageList = [];
+  var contentList = [];
+  var singleFileDisplayed = false;
+  var contentTimeouts = []; // tracked explicitly so Reset() only clears content timers
+
+  function Reset() {
+    fileList = [];
+    currentIndex = 0;
+    isPlaying = false;
+    currentVideo = null;
+    videoList = [];
+    contentPromises = [];
+    currentPage = 0;
+    pageList = [];
+    contentList = [];
+    singleFileDisplayed = false;
+    contentTimeouts.forEach(id => clearTimeout(id));
+    contentTimeouts = [];
+  }
+
+  // When the 'filelist' event is received from the server
+  socket.on('filelist', async (data) => {
+    // Initialize the file list
+    const files = data.filter(content => content.display === display);
+    if (files.length != 0) {
+      fileList = files[0].files
+        
+    // Sort the file list
+      fileList.sort((a, b) => {
+      const regex = /^[0-9]/;
+      const aStartsWithNumber = regex.test(a);
+      const bStartsWithNumber = regex.test(b);
+
+      // If both files start with a number, use numeric comparison
+      // If only one starts with a number, it comes first
+      // If neither start with a number, use alphabetical comparison
+      if (aStartsWithNumber && bStartsWithNumber) {
+        return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+      } else if (aStartsWithNumber) {
+        return -1;
+      } else if (bStartsWithNumber) {
+        return 1;
+      } else {
+        return a.localeCompare(b, undefined, { sensitivity: 'base' });
+      }
+    })
+  
+    //console.log(fileList);
+
+    // Handle each file according to its type (pdf, image, url or video)
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i];
+      const fileLower = file.toLowerCase();
+      if (fileLower.endsWith('.pdf')) {
+        await handlePDF(file, i);
+      } else if (['.jpg', '.jpeg', '.jfif', '.png', '.gif', '.webp', '.svg', '.svgz', '.bmp', '.ico', '.avif'].some(ext => fileLower.endsWith(ext))) {
+        await handleImage(file, i);
+      } else if (['.mp4', '.webm', '.ogv', '.ogg'].some(ext => fileLower.endsWith(ext))) {
+        await handleVideo(file, i);
+      } else if (fileLower.endsWith('.json')) {
+        await handleURL(file, i);
+      }
+    }
+
+    if (fileList.length == 0) {
+      document.getElementById("waitingTxt").style.opacity = 1;
+      document.getElementById("loadingTxt").style.opacity = 0;
+    } else {
+      document.getElementById("loadingTxt").style.opacity = 1;
+      document.getElementById("waitingTxt").style.opacity = 0;
+      // Hide loading indicator and start content transition
+      contentTimeouts.push(setTimeout(function () {
+        anime({
+          targets: document.getElementById("loadInidcator"),
+          opacity: [1, 0],
+          duration: 2000,
+          easing: 'easeInOutSine',
+          complete: function (anim) {
+            document.getElementById("loadInidcator").style.display = "none";
+            ChangeFile();
+          }
+        });
+      }, 2 * 1000));
+    }
+}});
+
+  // When the 'reload' event is received from the server, reload the page
+  socket.on('update', (data) => {
+    console.log('Update from Server recieved... for Display: ' + data)
+    
+    if (data === display) {
+      Reset();
+      document.getElementById("loadingTxt").style.opacity = 0;
+      document.getElementById("cc").innerHTML = '';
+      document.getElementById("loadInidcator").style.display = null;
+      document.getElementById("loadInidcator").style.opacity = 1;
+      socket.emit('requpdate', (display));
+      console.log("Content changed!");
+    }
+  });
+
+
+  // When the 'settings' event is received from the server, change settings
+  socket.on('settings', (data) => {
+    if (data.contentIntervall) contentTime = data.contentIntervall;
+    if (data.backgroundColor) document.getElementById("contentBody").style.backgroundColor = data.backgroundColor;
+  });
+
+  const tickerQueue = { urgentMsg: null, infoMsg: null };
+
+  function applyTickerText(id, text) {
+    const el = document.getElementById(id);
+    const bar = id === 'urgentMsg'
+      ? document.getElementById('urgent')
+      : document.getElementById('bottombar');
+
+    el.textContent = text;
+    el.classList.remove('scrolling'); // Stop animation via class — reliable in all states
+
+    if (!text || !text.trim()) {
+      bar.classList.remove('active');
+      return;
+    }
+
+    bar.classList.add('active');
+    void el.offsetWidth; // Commit class removal before re-adding
+    const speed = 200; // px/s — constant scroll speed regardless of text length
+    const duration = (window.innerWidth + el.scrollWidth) / speed;
+    el.style.setProperty('--ticker-duration', `${duration.toFixed(1)}s`);
+    el.classList.add('scrolling'); // Start animation via class
+  }
+
+  function setTickerText(id, text) {
+    const el = document.getElementById(id);
+    if (el.textContent === text) return; // Skip if unchanged (prevents constant restarts)
+    const isAnimating = el.classList.contains('scrolling');
+    if (!isAnimating) {
+      applyTickerText(id, text);
+    } else {
+      tickerQueue[id] = text; // Wait for current pass to finish
+    }
+  }
+
+  ['urgentMsg', 'infoMsg'].forEach(id => {
+    document.getElementById(id).addEventListener('animationiteration', () => {
+      if (tickerQueue[id] !== null) {
+        const next = tickerQueue[id];
+        tickerQueue[id] = null;
+        applyTickerText(id, next);
+      }
+    });
+  });
+
+  // When the 'urgent data' event is received from the server, check if the data belongs to this Display and change text
+  socket.on('urgent', (data) => {
+    if (data.display === display) {
+      setTickerText('urgentMsg', data.text);
+    }
+  });
+
+  // When the 'info data' event is received from the server, check if the data belongs to this Display and change text
+  socket.on('info', (data) => {
+    if (data.display === display) {
+      setTickerText('infoMsg', data.text);
+    }
+  });
+
+  // if the 'restart' event ist received from the the server (restart during runtime), then reload the page
+  socket.on('restart', (data) => {
+    location.reload(true);
+  });
+
+  // Calculate viewport size, considering device pixel ratio
+  function calculateViewportSize() {
+    const width = document.documentElement.clientWidth * window.devicePixelRatio || document.body.clientWidth * window.devicePixelRatio;
+    const height = document.documentElement.clientHeight * window.devicePixelRatio || document.body.clientHeight * window.devicePixelRatio;
+    return { width, height };
+  }
+
+
+  // Handle a PDF file
+  function handlePDF(file, index) {
+    return new Promise((resolve, reject) => {
+      pdfjsLib.getDocument("content/" + display + '/' + file).promise.then(async (pdf) => {
+        var numPages = pdf.numPages;
+
+        const processPage = async (pageIndex) => {
+          if (pageIndex > numPages) return; // No more pages to process
+
+          await new Promise((resolvePage, rejectPage) => {
+            pdf.getPage(pageIndex).then(page => {
+              const viewportSize = calculateViewportSize();
+              const viewport = page.getViewport({ scale: 1.0, ...viewportSize });
+
+              const scale = Math.min(viewportSize.width / viewport.width, viewportSize.height / viewport.height);
+              const scaledViewport = page.getViewport({ scale });
+
+              var fileView = document.createElement("div");
+              fileView.setAttribute("id", "pdf-" + index + "-" + pageIndex);
+              fileView.setAttribute("class", "pdf-viewer hidden");
+
+              const canvas = fileView.appendChild(document.createElement("canvas"));
+              canvas.setAttribute("class", "pdf-canvas");
+              const context = canvas.getContext('2d');
+              canvas.width = scaledViewport.width;
+              canvas.height = scaledViewport.height;
+
+              page.render({ canvasContext: context, viewport: scaledViewport }).promise.then(() => {
+                document.getElementById("cc").appendChild(fileView);
+                contentList.push(fileView);
+
+                // Process the next page
+                resolvePage(processPage(pageIndex + 1));
+              });
+            }).catch(rejectPage);
+          });
+        };
+
+        // Start processing from the first page
+        await processPage(1);
+        resolve();
+      }).catch(reject);
+    });
+  }
+
+  // Handle an image file
+  function handleImage(file, index) {
+    return new Promise((resolve, reject) => {
+      var imageView = document.createElement("div");
+      imageView.setAttribute("id", "img-" + index);
+      imageView.setAttribute("class", "img-viewer hidden");
+
+      var img = imageView.appendChild(document.createElement("img"));
+      img.setAttribute("class", "img-content");
+      img.src = "content/" + display + '/' + file;
+
+      document.getElementById("cc").appendChild(imageView);
+      contentList.push(imageView);
+      img.onerror = reject;
+      img.onload = resolve;
+    });
+  }
+
+   // Handle an URL for displaying in an iframe
+   function handleURL(file, index) {
+    return new Promise((resolve, reject) => {
+      var webView = document.createElement("div");
+      webView.setAttribute("id", "web-" + index);
+      webView.setAttribute("class", "web-viewer hidden");
+      var web = webView.appendChild(document.createElement("iframe"));
+      web.setAttribute("class", "web-content");
+      web.src = 'http://localhost'; // set a default URL if somethings go wrong....
+      loadJsonUrl('content/' + display + '/' + file).then(remoteVar => {
+        if (remoteVar && remoteVar.url) {
+          web.src = remoteVar.url;
+        }
+      });
+      document.getElementById("cc").appendChild(webView);
+      contentList.push(webView);
+      web.onerror = reject;
+      web.onload = resolve;       
+    });
+  }
+
+  // Handle a video file
+  function handleVideo(file, index) {
+    return new Promise((resolve, reject) => {
+      var videoView = document.createElement("div");
+      videoView.setAttribute("id", "video-" + index);
+      videoView.setAttribute("class", "video-viewer hidden");
+      videoView.setAttribute("data-video-index", videoList.length); // Set the video index as attribute
+
+      var video = videoView.appendChild(document.createElement("video"));
+      video.setAttribute("class", "video-content");
+      video.src = "content/" + display + '/' + file;
+      if (fileList.length == 1) video.loop = true;
+      video.autoplay = true;
+      video.muted = true;
+      video.onended = function () {
+        this.currentTime = 0;  // reset video time
+        currentIndex++;
+        if (currentIndex >= contentList.length) currentIndex = 0;
+        isPlaying = false;
+        ChangeFile();
+      }
+
+      document.getElementById("cc").appendChild(videoView);
+      videoList.push(video);
+      contentList.push(videoView);
+      video.onerror = reject;
+      video.oncanplay = resolve;
+    });
+  }
+  
+  async function loadJsonUrl(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Error during loading: ${response.status}`);
+    const text = await response.json(); 
+    return text;
+  } catch (err) {
+    console.error('Error:', err);
+    return null;
+  }
+}
+
+
+  // Transition from one piece of content to another
+  function ChangeFile() {
+    // If a video is still playing, or there is no content in the content folder, or there is only a single content in the folder wich allready have displayed -> return
+    if (isPlaying || singleFileDisplayed == true) {
+      return;
+      //if there is only one file in the content folder and it is not displayed -> display it once and change the boolean to true
+    } else if (fileList.length == 1 && document.getElementById("cc").childElementCount == 1 && singleFileDisplayed == false) {
+      singleFileDisplayed = true;
+    } else if (fileList.length == 0) {
+      return;
+    }
+
+    contentList.forEach((content, idx) => {
+      if (idx === currentIndex) {
+        anime({
+          targets: content,
+          opacity: [0, 1],
+          duration: 1000,
+          easing: 'easeInOutSine',
+          begin: function (anim) {
+            content.style.display = 'flex';
+          }
+        });
+
+        // Play video
+        if (content.className.includes("video-viewer")) {
+          var videoIndex = parseInt(content.getAttribute('data-video-index')); // Retrieve the video index from attribute
+          currentVideo = videoList[videoIndex];
+
+          currentVideo.addEventListener('loadeddata', function () {
+            currentVideo.play();
+            isPlaying = true;
+          }, { once: true });
+
+          currentVideo.addEventListener('error', function () {
+            // Video failed to load, move to next content immediately
+            currentIndex++;
+            if (currentIndex >= contentList.length) currentIndex = 0;
+            ChangeFile();
+          }, { once: true });
+        } else {
+          // For non-video content, start the timer immediately
+          contentTimeouts.push(setTimeout(function () {
+            currentIndex++;
+            if (currentIndex >= contentList.length) currentIndex = 0;
+            ChangeFile();
+          }, contentTime * 1000));
+        }
+      } else {
+        anime({
+          targets: content,
+          opacity: [1, 0],
+          duration: 1000,
+          easing: 'easeInOutSine',
+          complete: function (anim) {
+            content.style.display = 'none';
+          }
+        });
+      }
+    });
+  }
+
+  // Add event listener to detect when the tab visibility changes
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      // Tab has become visible again, so check if content needs updating
+      location.reload();
+    }
+  }, false);
+
+</script>
+
+</html>
