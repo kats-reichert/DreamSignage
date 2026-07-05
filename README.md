@@ -2,6 +2,8 @@
 
 DreamSignageX ist ein Fork von [DreamSignage](https://github.com/Ammarillo/DreamSignage) von [Aurelio Brenker (Ammarillo)](https://github.com/Ammarillo) — vielen Dank für die tolle Grundlage!
 
+[![Demo](docs/use.png)](docs/use.mp4)
+
 ---
 
 Das Ziel war es, ein einfaches Digital Signage System zu entwickeln, welches mehrere unterschiedliche Screens bedienen kann.
